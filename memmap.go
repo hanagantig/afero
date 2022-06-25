@@ -87,6 +87,18 @@ func (m *MemMapFs) findParent(f *mem.FileData) *mem.FileData {
 	return pfile
 }
 
+func (m *MemMapFs) findDescendants(name string) []*mem.FileData {
+	fData := m.getData()
+	descendants := make([]*mem.FileData, 0, len(fData))
+	for p, dFile := range fData {
+		if strings.HasPrefix(p, name+FilePathSeparator) {
+			descendants = append(descendants, dFile)
+		}
+	}
+
+	return descendants
+}
+
 func (m *MemMapFs) registerWithParent(f *mem.FileData, perm os.FileMode) {
 	if f == nil {
 		return
@@ -290,30 +302,63 @@ func (m *MemMapFs) RemoveAll(path string) error {
 	return nil
 }
 
-func (m *MemMapFs) Rename(oldname, newname string) error {
-	oldname = normalizePath(oldname)
-	newname = normalizePath(newname)
+func (m *MemMapFs) Rename(oldName, newName string) error {
+	oldName = normalizePath(oldName)
+	newName = normalizePath(newName)
 
-	if oldname == newname {
+	if oldName == newName {
 		return nil
 	}
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if _, ok := m.getData()[oldname]; ok {
+	if _, ok := m.getData()[oldName]; ok {
 		m.mu.RUnlock()
 		m.mu.Lock()
-		m.unRegisterWithParent(oldname)
-		fileData := m.getData()[oldname]
-		delete(m.getData(), oldname)
-		mem.ChangeFileName(fileData, newname)
-		m.getData()[newname] = fileData
+		err := m.unRegisterWithParent(oldName)
+		if err != nil {
+			return err
+		}
+
+		err = m.renameDescendants(oldName, newName)
+		if err != nil {
+			return err
+		}
+
+		fileData := m.getData()[oldName]
+		mem.ChangeFileName(fileData, newName)
+		m.getData()[newName] = fileData
+		delete(m.getData(), oldName)
+
 		m.registerWithParent(fileData, 0)
 		m.mu.Unlock()
 		m.mu.RLock()
 	} else {
-		return &os.PathError{Op: "rename", Path: oldname, Err: ErrFileNotFound}
+		return &os.PathError{Op: "rename", Path: oldName, Err: ErrFileNotFound}
 	}
+	return nil
+}
+
+func (m *MemMapFs) renameDescendants(oldName, newName string) error {
+	descendants := m.findDescendants(oldName)
+	removes := make([]string, 0, len(descendants))
+	for _, desc := range descendants {
+		descNewName := strings.Replace(desc.Name(), oldName, newName, 1)
+		err := m.unRegisterWithParent(desc.Name())
+		if err != nil {
+			return err
+		}
+
+		removes = append(removes, desc.Name())
+		mem.ChangeFileName(desc, descNewName)
+		m.getData()[descNewName] = desc
+
+		m.registerWithParent(desc, 0)
+	}
+	for _, r := range removes {
+		delete(m.getData(), r)
+	}
+
 	return nil
 }
 
